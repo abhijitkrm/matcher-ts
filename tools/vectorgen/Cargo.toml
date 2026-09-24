@@ -1,0 +1,8 @@
+[package]
+name = "vectorgen"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic workload/corpus generator for matcher benchmarks"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

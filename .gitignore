@@ -1,0 +1,7 @@
+node_modules/
+dist/
+bench/corpora/
+*.run.cmd.jsonl
+*.setup.cmd.jsonl
+target/
+.DS_Store

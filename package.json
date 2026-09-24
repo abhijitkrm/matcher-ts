@@ -1,0 +1,32 @@
+{
+  "name": "@abhijitkrm/matcher",
+  "version": "0.1.0",
+  "description": "Deterministic FIFO order-matching engine — up to ~5M orders/sec",
+  "license": "(MIT OR Apache-2.0)",
+  "type": "commonjs",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "files": [
+    "dist/src"
+  ],
+  "keywords": [
+    "matching-engine",
+    "order-book",
+    "exchange",
+    "lob",
+    "hft"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node dist/tests/golden.js",
+    "bench": "npm run build && node dist/bench/matcherbench.js",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "typescript": "^5.9.3"
+  }
+}
