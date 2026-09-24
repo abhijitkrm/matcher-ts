@@ -135,7 +135,15 @@ prevention belongs to the layer above.
 `Engine` maps `symbol → OrderBook` (each symbol its own config). `submit(symbol,
 cmd)` routes to the book, creating it on first use with the engine's default
 config if not pre-registered. Events passed to the sink are tagged with
-`symbol`. Routing adds no semantics; all rules above are per-book.
+`symbol`. Routing adds no semantics; all rules above are per-book:
+
+- The order-id namespace is per-symbol: the same `order_id` may live
+  simultaneously on different books and interacts only with its own book.
+- `seq` remains per-book: events from different symbols interleave in the
+  sink but carry each book's own dense sequence.
+- A symbol's book is created lazily on first `submit`; its `seq` starts at 1.
+- No cross-book atomicity: a command touches exactly one book. Features that
+  need it (implied orders, cross-book STP) are out of scope (§9).
 
 ## 7. Determinism rules
 

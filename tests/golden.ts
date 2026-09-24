@@ -6,13 +6,16 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { BookConfig, OrderBook } from "../src/book";
+import { Engine } from "../src/engine";
 import { IndexKind } from "../src/priceindex";
 import { VecSink } from "../src/sink";
 import {
   Command,
   OType,
   Side,
+  Symbol,
   Tif,
+  eventCanonical,
   sideFromStr,
 } from "../src/types";
 import { getI64, getStr } from "../src/jsonflat";
@@ -29,6 +32,7 @@ interface Header {
   pmax: number;
   maxOrders: number;
   index: IndexKind;
+  engine: boolean;
 }
 
 function parseHeader(line: string, mode: IndexKind): Header {
@@ -38,10 +42,12 @@ function parseHeader(line: string, mode: IndexKind): Header {
     pmax: getI64(line, "pmax") ?? 0,
     maxOrders: getI64(line, "max_orders") ?? 65536,
     index: mode,
+    engine: getStr(line, "engine") === "true",
   };
 }
 
-function parseCommand(line: string): Command {
+function parseCommand(line: string): [Symbol, Command] {
+  const sym = getI64(line, "symbol") ?? 0;
   const cmd = getStr(line, "cmd");
   switch (cmd) {
     case "new": {
@@ -52,7 +58,7 @@ function parseCommand(line: string): Command {
         tifStr === "ioc" ? Tif.Ioc :
         tifStr === "fok" ? Tif.Fok :
         tifStr === "post_only" ? Tif.PostOnly : Tif.Gtc;
-      return {
+      return [sym, {
         kind: "new",
         orderId: getI64(line, "order_id")!,
         side: side ?? Side.Bid,
@@ -60,17 +66,17 @@ function parseCommand(line: string): Command {
         price: getI64(line, "price") ?? 0,
         qty: getI64(line, "qty")!,
         tif,
-      };
+      }];
     }
     case "cancel":
-      return { kind: "cancel", orderId: getI64(line, "order_id")! };
+      return [sym, { kind: "cancel", orderId: getI64(line, "order_id")! }];
     case "replace":
-      return {
+      return [sym, {
         kind: "replace",
         orderId: getI64(line, "order_id")!,
         price: getI64(line, "price") ?? 0,
         qty: getI64(line, "qty")!,
-      };
+      }];
     default:
       throw new Error(`unknown cmd in line: ${line}`);
   }
@@ -85,10 +91,21 @@ function runVector(cmdPath: string, mode: IndexKind): string {
     maxOrders: h.maxOrders,
     index: h.index,
   };
+  if (h.engine) {
+    const eng = new Engine(cfg);
+    const out: string[] = [];
+    for (let i = 1; i < lines.length; i++) {
+      const [sym, cmd] = parseCommand(lines[i]);
+      eng.apply(sym, cmd, {
+        onEvent: (seq, ev) => out.push(eventCanonical(seq, ev, sym)),
+      });
+    }
+    return out.join("\n") + "\n";
+  }
   const book = new OrderBook(cfg);
   const sink = new VecSink();
   for (let i = 1; i < lines.length; i++) {
-    book.apply(parseCommand(lines[i]), sink);
+    book.apply(parseCommand(lines[i])[1], sink);
   }
   return sink.canonical();
 }

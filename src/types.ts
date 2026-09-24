@@ -110,19 +110,21 @@ export type Event =
   | { kind: "closed"; orderId: OrderId; reason: CloseReason }
   | { kind: "replaced"; orderId: OrderId; price: Price; qty: Qty };
 
-/// Canonical event line (SCHEMA.md) — no trailing newline.
-export function eventCanonical(seq: number, ev: Event): string {
+/// Canonical event line (SCHEMA.md) — no trailing newline. `sym` adds the
+/// `"symbol":N` field used by `engine:true` vectors.
+export function eventCanonical(seq: number, ev: Event, sym?: Symbol): string {
+  const sf = sym === undefined ? "" : `,"symbol":${sym}`;
   switch (ev.kind) {
     case "accepted":
-      return `{"seq":${seq},"ev":"accepted","order_id":${ev.orderId},"leaves_qty":${ev.leavesQty}}`;
+      return `{"seq":${seq},"ev":"accepted"${sf},"order_id":${ev.orderId},"leaves_qty":${ev.leavesQty}}`;
     case "rejected":
-      return `{"seq":${seq},"ev":"rejected","order_id":${ev.orderId},"reason":"${rejectStr(ev.reason)}"}`;
+      return `{"seq":${seq},"ev":"rejected"${sf},"order_id":${ev.orderId},"reason":"${rejectStr(ev.reason)}"}`;
     case "trade":
-      return `{"seq":${seq},"ev":"trade","maker":${ev.maker},"taker":${ev.taker},"price":${ev.price},"qty":${ev.qty}}`;
+      return `{"seq":${seq},"ev":"trade"${sf},"maker":${ev.maker},"taker":${ev.taker},"price":${ev.price},"qty":${ev.qty}}`;
     case "closed":
-      return `{"seq":${seq},"ev":"closed","order_id":${ev.orderId},"reason":"${closeStr(ev.reason)}"}`;
+      return `{"seq":${seq},"ev":"closed"${sf},"order_id":${ev.orderId},"reason":"${closeStr(ev.reason)}"}`;
     case "replaced":
-      return `{"seq":${seq},"ev":"replaced","order_id":${ev.orderId},"price":${ev.price},"qty":${ev.qty}}`;
+      return `{"seq":${seq},"ev":"replaced"${sf},"order_id":${ev.orderId},"price":${ev.price},"qty":${ev.qty}}`;
   }
 }
 

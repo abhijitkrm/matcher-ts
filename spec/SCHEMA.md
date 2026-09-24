@@ -25,6 +25,10 @@ Line 1 — header:
   the vector under both indexes — they must produce the identical event stream.
   Only use a single mode when semantics legitimately differ (out-of-range
   prices: rejected in ladder, valid in tree).
+- `engine`: optional boolean, default false. When true the vector drives the
+  multi-symbol `Engine` (SPEC §6): every command line carries `"symbol":N`
+  (u32) and `pmin`/`pmax`/`max_orders`/`index` become the engine's default
+  book config applied to each symbol it creates.
 
 Subsequent lines — one command each. `cmd` field first, then fields in the
 order shown:
@@ -41,6 +45,9 @@ order shown:
 - `cancel`: `order_id`.
 - `replace`: `order_id`, `price`, `qty` — the new values.
 
+In `engine:true` vectors, each command line additionally carries
+`"symbol":N` (u32) immediately after `"cmd"`.
+
 ## Event file (.evt.jsonl)
 
 Line 1 — header `{"format":"matcher-vector/1","name":"<same>"}`.
@@ -56,6 +63,8 @@ Then one event per line, canonical key order (byte-exact):
 
 Canonical rules:
 - Key order exactly: `seq`, `ev`, then event fields in the order above.
+- In `engine:true` vectors, `"symbol":N` follows `ev` on every event line
+  (the book's own per-book `seq` is unchanged — sequences are per-symbol).
 - JSON compact: `{"k":v,"k":v}` — single `:` after keys, `,` between pairs, no spaces.
 - Strings are the lowercase tokens from SPEC (reasons, ev names).
 - Numbers serialized as base-10 integers.
