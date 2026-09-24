@@ -86,7 +86,8 @@ function main(): void {
   console.log(
     `${tag}: ${run.length} ops in ${(totalNs / 1e6).toFixed(1)}ms` +
       ` => ${Math.round(ops).toLocaleString("en-US")} ops/s` +
-      ` p50=${pct(lat, 50).toFixed(0)}ns p99=${pct(lat, 99).toFixed(0)}ns` +
+      ` p50=${pct(lat, 50).toFixed(0)}ns p90=${pct(lat, 90).toFixed(0)}ns` +
+      ` p99=${pct(lat, 99).toFixed(0)}ns p99.9=${pct(lat, 99.9).toFixed(0)}ns` +
       ` max=${pct(lat, 100).toFixed(0)}ns checksum=${sink.acc}`,
   );
 }
