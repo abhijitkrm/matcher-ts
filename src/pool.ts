@@ -57,7 +57,8 @@ export class Pool {
     level.tail = i;
   }
 
-  levelUnlink(level: { head: number; tail: number }, i: number): void {
+  /// Unlink `i` from anywhere in `level` and adjust the level total.
+  levelUnlink(level: { head: number; tail: number; total: number }, i: number): void {
     const p = this.prev[i];
     const n = this.next[i];
     if (p !== NIL) this.next[p] = n;
@@ -65,6 +66,7 @@ export class Pool {
     if (n !== NIL) this.prev[n] = p;
     else level.tail = p;
     this.prev[i] = this.next[i] = NIL;
+    level.total -= this.qty[i];
   }
 
   set(i: number, id: OrderId, side: Side, otype: OType, tif: Tif, price: Price, qty: Qty): void {
