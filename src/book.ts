@@ -39,6 +39,15 @@ export interface OrderInfo {
   qty: Qty;
 }
 
+/// One live order, for snapshot serialization (spec/JOURNAL.md).
+export interface RestingOrder {
+  orderId: OrderId;
+  side: Side;
+  price: Price;
+  qty: Qty;
+  tif: Tif;
+}
+
 export class OrderBook {
   private readonly pool: Pool;
   private readonly map: OrderMap;
@@ -117,7 +126,7 @@ export class OrderBook {
     if (remaining === 0) {
       this.emit(sink, { kind: "closed", orderId, reason: CloseReason.Filled });
     } else if (otype === OType.Limit && (tif === Tif.Gtc || tif === Tif.PostOnly)) {
-      this.rest(orderId, side, price, remaining);
+      this.rest(orderId, side, price, remaining, tif);
       this.emit(sink, { kind: "accepted", orderId, leavesQty: remaining });
     } else {
       this.emit(sink, { kind: "closed", orderId, reason: CloseReason.Expired });
@@ -240,9 +249,9 @@ export class OrderBook {
 
   /// Insert a resting order (pool slot guaranteed available by the book-full
   /// check at ingest).
-  private rest(orderId: OrderId, side: Side, price: Price, qty: Qty): void {
+  private rest(orderId: OrderId, side: Side, price: Price, qty: Qty, tif: Tif): void {
     const idx = this.pool.alloc();
-    this.pool.set(idx, orderId, side, OType.Limit, Tif.Gtc, price, qty);
+    this.pool.set(idx, orderId, side, OType.Limit, tif, price, qty);
     const own = side === Side.Bid ? this.bids : this.asks;
     const lvl = own.levelInsert(price);
     lvl.total += qty;
@@ -272,6 +281,52 @@ export class OrderBook {
   }
   depth(side: Side, n: number) {
     return (side === Side.Bid ? this.bids : this.asks).depth(n);
+  }
+
+  // ---- snapshot surface (spec/JOURNAL.md) -----------------------------------
+
+  /// All live orders in book order: bids best→worst then asks best→worst,
+  /// FIFO within each level.
+  restingOrders(): RestingOrder[] {
+    const out: RestingOrder[] = [];
+    for (const side of [Side.Bid, Side.Ask]) {
+      const idx = side === Side.Bid ? this.bids : this.asks;
+      for (const d of idx.depth(Number.MAX_SAFE_INTEGER)) {
+        const lvl = idx.levelMut(d.price);
+        if (lvl === undefined) continue;
+        for (let i = lvl.head; i !== NIL; i = this.pool.next[i]) {
+          out.push({
+            orderId: this.pool.id[i],
+            side: this.pool.side[i],
+            price: this.pool.price[i],
+            qty: this.pool.qty[i],
+            tif: this.pool.tif[i],
+          });
+        }
+      }
+    }
+    return out;
+  }
+
+  /// Rebuild a book from a snapshot: same config, explicit seq, resting
+  /// orders replayed in snapshot order (bids then asks, FIFO per level).
+  static restore(cfg: BookConfig, seq: number, orders: RestingOrder[]): OrderBook {
+    const b = new OrderBook(cfg);
+    b.seq = seq;
+    for (const o of orders) {
+      const idx = b.pool.alloc();
+      if (idx === NIL) break;
+      b.pool.set(idx, o.orderId, o.side, OType.Limit, o.tif, o.price, o.qty);
+      const lvl = (o.side === Side.Bid ? b.bids : b.asks).levelInsert(o.price);
+      lvl.total += o.qty;
+      b.pool.levelPush(lvl, idx);
+      b.map.insert(o.orderId, idx);
+    }
+    return b;
+  }
+
+  config(): BookConfig {
+    return this.cfg;
   }
 
   // ---- internals ------------------------------------------------------------
