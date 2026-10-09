@@ -54,7 +54,7 @@ tools/      vectorgen — deterministic workload generator
 
 ```bash
 npm install        # dev deps: typescript + @types/node only
-npm test           # build + 41 golden vectors
+npm test           # build + 43 golden vectors
 
 # benchmark (see spec/BENCH.md)
 mkdir -p bench/corpora
