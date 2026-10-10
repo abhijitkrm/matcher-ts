@@ -2,7 +2,7 @@
 //! canonical event stream (symbol-tagged for engine corpora) to stdout.
 //! scripts/diffuzz.sh byte-diffs this output across implementations.
 
-import { readFileSync } from "node:fs";
+import { readLines } from "./lines";
 import { BookConfig, OrderBook } from "../src/book";
 import { Engine } from "../src/engine";
 import { IndexKind } from "../src/priceindex";
@@ -45,7 +45,7 @@ function main(): void {
     console.error("usage: matcherfuzz <cmd.jsonl>");
     process.exit(2);
   }
-  const lines = readFileSync(path, "utf8").split("\n");
+  const lines = readLines(path, true);
   const hdr = lines[0];
   const cfg: BookConfig = {
     priceMin: getI64(hdr, "pmin") ?? 0,

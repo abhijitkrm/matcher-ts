@@ -3,6 +3,7 @@
 //! Exits nonzero on a malformed journal line (truncated tail write).
 //!   node dist/bench/matcherrecover.js <snap.jsonl> <cmd-tail.jsonl>
 import { readFileSync } from "node:fs";
+import { readLines } from "./lines";
 import { parseSnapshot, restoreEngine } from "../src/snapshot";
 import { journalEvent } from "../src/journal";
 import { parseCmd } from "./matcherrun";
@@ -11,7 +12,7 @@ const [snapPath, tailPath] = [process.argv[2], process.argv[3]];
 const eng = restoreEngine(parseSnapshot(readFileSync(snapPath, "utf8")));
 
 const write = (l: string) => process.stdout.write(l);
-const lines = readFileSync(tailPath, "utf8").split("\n");
+const lines = readLines(tailPath, true);
 for (let i = 0; i < lines.length; i++) {
   const line = lines[i];
   if (line === "" || line.includes('"format"')) continue;

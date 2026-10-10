@@ -1,7 +1,8 @@
 //! matcherrun — e2e runner: apply an engine command stream, emit the canonical
 //! tagged event journal to stdout, optionally write a snapshot at the end.
 //!   node dist/bench/matcherrun.js <engine.cmd.jsonl> [--snap <path>]
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
+import { readLines } from "./lines";
 import { Engine } from "../src/engine";
 import { BookConfig } from "../src/book";
 import { IndexKind } from "../src/priceindex";
@@ -54,7 +55,7 @@ if (require.main === module) {
   const path = process.argv[2];
   const snapIdx = process.argv.indexOf("--snap");
   const snapPath = snapIdx >= 0 ? process.argv[snapIdx + 1] : undefined;
-  const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.length > 0);
+  const lines = readLines(path);
   const eng = new Engine(parseHeader(lines[0]));
   const write = (l: string) => process.stdout.write(l);
   for (let i = 1; i < lines.length; i++) {

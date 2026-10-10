@@ -5,7 +5,7 @@
 //! Loads `<prefix>.setup.cmd.jsonl` (untimed) + `<prefix>.run.cmd.jsonl`
 //! (measured ops). Reports ops/s and p50/p99/max per-command latency.
 
-import { readFileSync } from "node:fs";
+import { readLines } from "./lines";
 import { BookConfig, OrderBook } from "../src/book";
 import { IndexKind } from "../src/priceindex";
 import { NullSink } from "../src/sink";
@@ -28,20 +28,6 @@ function parseCommand(line: string): Command {
   }
   if (cmd === "cancel") return { kind: "cancel", orderId: getI64(line, "order_id")! };
   return { kind: "replace", orderId: getI64(line, "order_id")!, price: getI64(line, "price") ?? 0, qty: getI64(line, "qty")! };
-}
-
-/// Non-empty lines of a file, split on the bytes: a 10M-command corpus is
-/// over 1 GB, beyond V8's maximum string length, so it is never one string.
-function readLines(path: string): string[] {
-  const buf = readFileSync(path);
-  const out: string[] = [];
-  for (let at = 0; at < buf.length; ) {
-    let nl = buf.indexOf(10, at);
-    if (nl < 0) nl = buf.length;
-    if (nl > at) out.push(buf.toString("utf8", at, nl));
-    at = nl + 1;
-  }
-  return out;
 }
 
 function load(path: string): { cfg: BookConfig; cmds: Command[] } {
