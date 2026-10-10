@@ -30,8 +30,22 @@ function parseCommand(line: string): Command {
   return { kind: "replace", orderId: getI64(line, "order_id")!, price: getI64(line, "price") ?? 0, qty: getI64(line, "qty")! };
 }
 
+/// Non-empty lines of a file, split on the bytes: a 10M-command corpus is
+/// over 1 GB, beyond V8's maximum string length, so it is never one string.
+function readLines(path: string): string[] {
+  const buf = readFileSync(path);
+  const out: string[] = [];
+  for (let at = 0; at < buf.length; ) {
+    let nl = buf.indexOf(10, at);
+    if (nl < 0) nl = buf.length;
+    if (nl > at) out.push(buf.toString("utf8", at, nl));
+    at = nl + 1;
+  }
+  return out;
+}
+
 function load(path: string): { cfg: BookConfig; cmds: Command[] } {
-  const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.length > 0);
+  const lines = readLines(path);
   const h = lines[0];
   const cfg: BookConfig = {
     priceMin: getI64(h, "pmin") ?? 0,
