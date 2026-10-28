@@ -65,6 +65,9 @@ const now = (): number => Number(process.hrtime.bigint());
 // the (large) parsed corpus, which would otherwise finalize inside the timed
 // run. Exposed without a command-line flag via the usual vm trick.
 setFlagsFromString("--expose-gc");
+// TurboFan stops inlining into replace()/cross() at its default cumulative
+// budget (920 bytecodes); 2000 is +5-13% on W3/W4/W5 (see docs/RESULTS.md).
+setFlagsFromString("--max-inlined-bytecode-size-cumulative=2000");
 const fullGc = runInNewContext("gc") as () => void;
 
 function pct(s: Float64Array, p: number): number {
