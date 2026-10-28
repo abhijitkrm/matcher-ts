@@ -1,7 +1,7 @@
 {
   "name": "@abhijitkrm/matcher",
   "version": "0.2.0",
-  "description": "Deterministic FIFO order-matching engine — up to ~5M orders/sec",
+  "description": "Deterministic FIFO order-matching engine — up to ~32M orders/sec per core, 40M-92M across 8 workers",
   "license": "(MIT OR Apache-2.0)",
   "type": "commonjs",
   "main": "dist/src/index.js",

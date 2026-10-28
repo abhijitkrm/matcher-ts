@@ -67,14 +67,16 @@ function main(): void {
       });
     }
   } else {
+    // Book corpora go through applyBatch with the look-ahead forced on, so
+    // differential runs also cover the batch path (identical by contract).
     const book = new OrderBook(cfg);
+    const cmds: Command[] = [];
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i];
-      if (!line) continue;
-      book.apply(parseCommand(line)[1], {
-        onEvent: (seq, ev) => chunks.push(eventCanonical(seq, ev)),
-      });
+      if (line) cmds.push(parseCommand(line)[1]);
     }
+    book.setPrefetchThreshold(0);
+    book.applyBatch(cmds, { onEvent: (seq, ev) => chunks.push(eventCanonical(seq, ev)) });
   }
   process.stdout.write(chunks.join("\n") + (chunks.length ? "\n" : ""));
 }

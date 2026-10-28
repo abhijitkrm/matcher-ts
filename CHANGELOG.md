@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- New hot-path layout (`../matcher/docs/LAYOUT.md`): resting orders live
+  inline in 128-byte per-level chunks on typed arrays (`store.ts`),
+  `OrderMap` gets a 1-byte tag array; `pool.ts` is gone.
+- `OrderBook.applyBatch()` and `prefault()`. The look-ahead pipeline starts
+  at 2^19 live orders (at ~100k it halved W4); `setPrefetchThreshold` and
+  `matcherbench --lookahead on|off|auto` control it.
+- `matcherbench --mode latency|throughput|scale` (BENCH.md v2).
+- Throughput, Apple M1, Node 22: 32M ops/s on one core (1k live orders),
+  15M on the mixed workload; 8-worker aggregate 40M (mixed) to 92M (1k
+  live). See `../matcher/docs/RESULTS.md`.
+
 ## v0.2.0 — 2026-10-10
 
 - Journals and snapshots (`spec/JOURNAL.md`): command/event journal,

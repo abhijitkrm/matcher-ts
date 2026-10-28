@@ -1,7 +1,6 @@
 // The ladder's cursor agrees with a sorted reference under random churn on a
 // wide ladder, including whole summary words emptying and refilling.
 import { LadderIndex } from "../src/priceindex";
-import { NIL } from "../src/pool";
 import { Side } from "../src/types";
 
 const SPAN = 1 << 20;
@@ -30,13 +29,13 @@ for (const side of [Side.Bid, Side.Ask]) {
       else j = Math.min(lowerBound(p), set.length - 1);
       const q = set[j];
       set.splice(j, 1);
-      lad.levelMut(q)!.head = NIL;
+      lad.lev.setHead(lad.levelMut(q), 0);
       lad.unlinkLevel(q);
     } else {
       const j = lowerBound(p);
       if (set[j] !== p) {
         set.splice(j, 0, p);
-        lad.levelInsert(p).head = 0;
+        lad.lev.setHead(lad.levelInsert(p), 1);
       }
     }
     const want = set.length === 0 ? undefined : side === Side.Bid ? set[set.length - 1] : set[0];

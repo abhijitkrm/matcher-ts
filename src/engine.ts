@@ -3,7 +3,7 @@
 
 import { BookConfig, OrderBook } from "./book";
 import { Command, Event, Symbol } from "./types";
-import { Sink } from "./sink";
+import { AnySink } from "./sink";
 
 export class Engine {
   private readonly books = new Map<Symbol, OrderBook>();
@@ -20,7 +20,7 @@ export class Engine {
     return b;
   }
 
-  apply(symbol: Symbol, cmd: Command, sink: Sink): void {
+  apply(symbol: Symbol, cmd: Command, sink: AnySink): void {
     this.book(symbol).apply(cmd, sink);
   }
 

@@ -82,7 +82,7 @@ function parseCommand(line: string): [Symbol, Command] {
   }
 }
 
-function runVector(cmdPath: string, mode: IndexKind): string {
+function runVector(cmdPath: string, mode: IndexKind, batch = false): string {
   const lines = readFileSync(cmdPath, "utf8").split("\n").filter((l) => l.length > 0);
   const h = parseHeader(lines[0], mode);
   const cfg: BookConfig = {
@@ -104,6 +104,12 @@ function runVector(cmdPath: string, mode: IndexKind): string {
   }
   const book = new OrderBook(cfg);
   const sink = new VecSink();
+  if (batch) {
+    // Exercise the look-ahead pipeline: must match per-command apply exactly.
+    book.setPrefetchThreshold(0);
+    book.applyBatch(lines.slice(1).map((l) => parseCommand(l)[1]), sink);
+    return sink.canonical();
+  }
   for (let i = 1; i < lines.length; i++) {
     book.apply(parseCommand(lines[i])[1], sink);
   }
@@ -152,6 +158,10 @@ function main(): void {
         failed++;
       } else {
         checked++;
+      }
+      if (!headerLine.includes('"engine":true') && runVector(cmdPath, mode, true) !== expected) {
+        console.log(`FAIL ${v.file} [${IndexKind[mode]}]: applyBatch diverges from apply`);
+        failed++;
       }
     }
   }

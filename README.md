@@ -5,7 +5,9 @@
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
 Deterministic FIFO limit order book and matching engine core for Node.js /
-TypeScript — measured at up to **~5M orders/sec** (see `spec/BENCH.md`).
+TypeScript — measured at up to **~32M orders/sec** on one core (1k-order book, batched), ~15M on the
+mixed workload, and **40M** (mixed) to **92M** (1k-order books) aggregate across 8 worker
+threads (see `spec/BENCH.md`).
 
 Single-writer book per symbol, commands in, monotonically sequenced events out.
 All I/O hangs off the `Sink` seam; there is no networking, persistence, or

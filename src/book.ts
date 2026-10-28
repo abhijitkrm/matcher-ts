@@ -1,13 +1,13 @@
 //! The matching core. Single-writer, deterministic: commands in through
-//! `apply`, sequenced events out through the Sink seam. Mirrors spec/SPEC.md.
+//! `apply` / `applyBatch`, sequenced events out through the sink seam.
+//! Mirrors spec/SPEC.md; memory layout per docs/LAYOUT.md (v0.3).
 
-import { NIL, Pool } from "./pool";
+import { NIL, Store } from "./store";
 import { OrderMap } from "./ordermap";
-import { IndexKind, PriceIndex } from "./priceindex";
+import { IndexKind, LevelArena, PriceIndex } from "./priceindex";
 import {
   CloseReason,
   Command,
-  Event,
   OType,
   OrderId,
   Price,
@@ -16,7 +16,7 @@ import {
   Side,
   Tif,
 } from "./types";
-import { Sink } from "./sink";
+import { AnySink, EventAdapter, FlatSink, isFlat } from "./sink";
 
 export interface BookConfig {
   priceMin: Price;
@@ -48,19 +48,32 @@ export interface RestingOrder {
   tif: Tif;
 }
 
+// Look-ahead distances for applyBatch (LAYOUT.md §4).
+const D_MAP = 16;
+const D_CHUNK = 8;
+const D_LEVEL = 4;
+
 export class OrderBook {
-  private readonly pool: Pool;
+  private readonly store: Store;
   private readonly map: OrderMap;
   private readonly bids: PriceIndex;
   private readonly asks: PriceIndex;
   private seq = 0;
   private readonly cfg: BookConfig;
+  private readonly ladder: boolean;
+  private readonly pmin: number;
+  private readonly pmax: number;
+  private readonly maxOrders: number;
+  private readonly adapter = new EventAdapter({ onEvent: () => {} });
+  private prefetchMinLive = 1 << 19;
+  /// Sink for look-ahead loads (keeps them from being optimised away).
+  private touch = 0;
 
   constructor(cfg: BookConfig) {
     if (!(cfg.priceMax > cfg.priceMin) && cfg.index !== IndexKind.Tree) {
       throw new Error("price range must be non-empty");
     }
-    this.pool = new Pool(cfg.maxOrders);
+    this.store = new Store(cfg.maxOrders);
     this.map = new OrderMap(cfg.maxOrders);
     const mk = (side: Side) =>
       cfg.index === IndexKind.Ladder
@@ -69,10 +82,65 @@ export class OrderBook {
     this.bids = mk(Side.Bid);
     this.asks = mk(Side.Ask);
     this.cfg = cfg;
+    this.ladder = cfg.index === IndexKind.Ladder;
+    this.pmin = cfg.priceMin;
+    this.pmax = cfg.priceMax;
+    this.maxOrders = cfg.maxOrders;
+  }
+
+  /// Touch all bounded storage now (order store, map, ladder levels) — it is
+  /// otherwise committed lazily as the book grows. Costs ~128 B per
+  /// max_orders for the store plus the map and ladder arrays.
+  prefault(): void {
+    this.store.prefault();
+    this.map.prefault();
+    if (this.ladder) {
+      this.bids.lev.prefault();
+      this.asks.lev.prefault();
+    }
+  }
+
+  /// applyBatch runs its look-ahead loads only once this many orders rest
+  /// (a cache-resident book gains nothing from them). Tests set 0 to force
+  /// the pipeline on; a huge value turns it off.
+  setPrefetchThreshold(live: number): void {
+    this.prefetchMinLive = live;
+  }
+
+  private flat(sink: AnySink): FlatSink {
+    if (isFlat(sink)) return sink;
+    this.adapter.inner = sink;
+    return this.adapter;
   }
 
   /// Apply one command, emitting its event stream through `sink`.
-  apply(cmd: Command, sink: Sink): void {
+  apply(cmd: Command, sink: AnySink): void {
+    this.exec(cmd, this.flat(sink));
+  }
+
+  /// Apply a run of commands. The event stream is identical to calling
+  /// apply() on each in order; the batch only lets the book look ahead and
+  /// load the memory upcoming commands will touch (map slot, then the
+  /// order's chunk, then its price level) while the current command runs.
+  /// Look-ahead reads possibly-stale state and never writes book state.
+  applyBatch(cmds: readonly Command[], sink: AnySink): void {
+    const fs = this.flat(sink);
+    const n = cmds.length;
+    if (this.store.live < this.prefetchMinLive) {
+      for (let i = 0; i < n; i++) this.exec(cmds[i], fs);
+      return;
+    }
+    let t = 0;
+    for (let i = 0; i < n; i++) {
+      if (i + D_MAP < n) t += this.aheadMap(cmds[i + D_MAP]);
+      if (i + D_CHUNK < n) t += this.aheadChunk(cmds[i + D_CHUNK]);
+      if (i + D_LEVEL < n) t += this.aheadLevel(cmds[i + D_LEVEL]);
+      this.exec(cmds[i], fs);
+    }
+    this.touch = t | 0;
+  }
+
+  private exec(cmd: Command, sink: FlatSink): void {
     switch (cmd.kind) {
       case "new":
         this.newOrder(cmd.orderId, cmd.side, cmd.otype, cmd.price, cmd.qty, cmd.tif, sink);
@@ -86,6 +154,49 @@ export class OrderBook {
     }
   }
 
+  // ---- look-ahead (ordinary loads; JS has no prefetch intrinsic) ----------
+
+  private aheadMap(c: Command): number {
+    const m = this.map;
+    const i = OrderMap.mix(c.orderId) & m.mask;
+    return m.tags[i] + m.K[2 * i];
+  }
+
+  private aheadChunk(c: Command): number {
+    if (c.kind === "new") {
+      if (c.otype !== OType.Limit) return 0;
+      const own = c.side === Side.Bid ? this.bids : this.asks;
+      const li = own.peek(c.price);
+      return li < 0 ? 0 : own.lev.I[(li << 2) + 3];
+    }
+    const loc = this.map.get(c.orderId);
+    return loc < 0 ? 0 : this.store.F[(loc >> 3) << 4];
+  }
+
+  private aheadLevel(c: Command): number {
+    const st = this.store;
+    if (c.kind === "new") {
+      if (c.otype !== OType.Limit) return 0;
+      const own = c.side === Side.Bid ? this.bids : this.asks;
+      const li = own.peek(c.price);
+      if (li < 0) return 0;
+      const tc = own.lev.I[(li << 2) + 3];
+      return tc === NIL ? 0 : st.B[(tc << 7) + 17];
+    }
+    const loc = this.map.get(c.orderId);
+    if (loc < 0) return 0;
+    const ch = (loc >> 3) << 4;
+    const own = st.B[(ch << 3) + 19] === Side.Bid ? this.bids : this.asks;
+    const p = st.F[ch];
+    let li = own.peek(p);
+    let t = li < 0 ? 0 : own.lev.F[li << 1];
+    if (c.kind === "replace" && c.price !== p) {
+      li = own.peek(c.price);
+      if (li >= 0) t += own.lev.F[li << 1];
+    }
+    return t;
+  }
+
   // ---- commands -----------------------------------------------------------
 
   private newOrder(
@@ -95,22 +206,23 @@ export class OrderBook {
     price: Price,
     qty: Qty,
     tif: Tif,
-    sink: Sink,
+    sink: FlatSink,
   ): void {
     // SPEC §4.3 validation precedence.
     if (qty === 0) {
       return this.reject(sink, orderId, RejectReason.InvalidQty);
     }
-    if (otype === OType.Limit && !this.priceOk(price)) {
+    const limit = otype === OType.Limit;
+    if (limit && !this.priceOk(price)) {
       return this.reject(sink, orderId, RejectReason.InvalidPrice);
     }
-    if (this.map.contains(orderId)) {
+    if (this.map.find(orderId) >= 0) {
       return this.reject(sink, orderId, RejectReason.DuplicateOrderId);
     }
-    if (this.pool.live >= this.cfg.maxOrders) {
+    if (this.store.live >= this.maxOrders) {
       return this.reject(sink, orderId, RejectReason.BookFull);
     }
-    if (otype === OType.Limit) {
+    if (limit) {
       if (tif === Tif.PostOnly) {
         if (this.wouldCross(side, price)) {
           return this.reject(sink, orderId, RejectReason.PostOnlyWouldCross);
@@ -120,39 +232,41 @@ export class OrderBook {
       }
     }
 
-    const bound = otype === OType.Limit ? price : undefined;
-    const remaining = this.cross(side, bound, orderId, qty, sink);
+    const remaining = this.cross(side, limit, price, orderId, qty, sink);
 
     if (remaining === 0) {
-      this.emit(sink, { kind: "closed", orderId, reason: CloseReason.Filled });
-    } else if (otype === OType.Limit && (tif === Tif.Gtc || tif === Tif.PostOnly)) {
+      sink.closed(++this.seq, orderId, CloseReason.Filled);
+    } else if (limit && (tif === Tif.Gtc || tif === Tif.PostOnly)) {
       this.rest(orderId, side, price, remaining, tif);
-      this.emit(sink, { kind: "accepted", orderId, leavesQty: remaining });
+      sink.accepted(++this.seq, orderId, remaining);
     } else {
-      this.emit(sink, { kind: "closed", orderId, reason: CloseReason.Expired });
+      sink.closed(++this.seq, orderId, CloseReason.Expired);
     }
   }
 
-  private cancel(orderId: OrderId, sink: Sink): void {
-    const idx = this.map.get(orderId);
-    if (idx < 0) {
+  private cancel(orderId: OrderId, sink: FlatSink): void {
+    const map = this.map;
+    const mi = map.find(orderId);
+    if (mi < 0) {
       return this.reject(sink, orderId, RejectReason.UnknownOrderId);
     }
-    const price = this.pool.price[idx];
-    const side = this.pool.side[idx];
-    const own = side === Side.Bid ? this.bids : this.asks;
-    const lvl = own.levelMut(price);
-    if (lvl !== undefined) this.pool.levelUnlink(lvl, idx);
+    const st = this.store;
+    const loc = map.valAt(mi);
+    const ch = loc >> 3;
+    const price = st.F[ch << 4];
+    const own = st.B[(ch << 7) + 19] === Side.Bid ? this.bids : this.asks;
+    const li = own.levelMut(price);
+    if (li >= 0) st.unlink(own.lev, li, loc);
     own.unlinkLevel(price);
-    this.map.remove(orderId);
-    this.pool.free(idx);
-    this.emit(sink, { kind: "closed", orderId, reason: CloseReason.Cancelled });
+    map.removeAt(mi);
+    sink.closed(++this.seq, orderId, CloseReason.Cancelled);
   }
 
-  private replace(orderId: OrderId, price: Price, qty: Qty, sink: Sink): void {
+  private replace(orderId: OrderId, price: Price, qty: Qty, sink: FlatSink): void {
     // SPEC §4.3: unknown -> invalid_qty -> invalid_price.
-    const idx = this.map.get(orderId);
-    if (idx < 0) {
+    const map = this.map;
+    const mi = map.find(orderId);
+    if (mi < 0) {
       return this.reject(sink, orderId, RejectReason.UnknownOrderId);
     }
     if (qty === 0) {
@@ -161,120 +275,120 @@ export class OrderBook {
     if (!this.priceOk(price)) {
       return this.reject(sink, orderId, RejectReason.InvalidPrice);
     }
-    const oldPrice = this.pool.price[idx];
-    const oldQty = this.pool.qty[idx];
-    const side = this.pool.side[idx];
+    const st = this.store;
+    const loc = map.valAt(mi);
+    const ch = loc >> 3;
+    const oldPrice = st.F[ch << 4];
+    const oldQty = st.F[2 * loc + 5];
+    const side: Side = st.B[(ch << 7) + 19];
+    const tif = st.B[(ch << 7) + 20 + (loc & 7)];
     const own = side === Side.Bid ? this.bids : this.asks;
 
     if (price === oldPrice && qty <= oldQty) {
       // Quantity decrease (or no-op): keeps time priority.
-      const lvl = own.levelMut(price);
-      if (lvl !== undefined) lvl.total -= oldQty - qty;
-      this.pool.qty[idx] = qty;
-      this.emit(sink, { kind: "replaced", orderId, price, qty });
+      const li = own.levelMut(price);
+      if (li >= 0) own.lev.F[li << 1] -= oldQty - qty;
+      st.F[2 * loc + 5] = qty;
+      sink.replaced(++this.seq, orderId, price, qty);
       return;
     }
 
-    // Priority loss: unlink and re-enter the aggressive GTC limit path.
-    const oldLvl = own.levelMut(oldPrice);
-    if (oldLvl !== undefined) this.pool.levelUnlink(oldLvl, idx);
+    // Leave the book (losing time priority), re-cross at the new price, rest
+    // any remainder at the back of the new level. The map entry is kept
+    // across cross() so the id stays reserved; it is rewritten (or removed)
+    // afterwards.
+    const oli = own.levelMut(oldPrice);
+    if (oli >= 0) st.unlink(own.lev, oli, loc);
     own.unlinkLevel(oldPrice);
-    this.pool.price[idx] = price;
-    this.pool.qty[idx] = qty;
 
-    const remaining = this.cross(side, price, orderId, qty, sink);
+    const removes = map.removes;
+    const remaining = this.cross(side, true, price, orderId, qty, sink);
 
     if (remaining === 0) {
-      this.map.remove(orderId);
-      this.pool.free(idx);
-      this.emit(sink, { kind: "closed", orderId, reason: CloseReason.Filled });
-    } else {
-      this.pool.qty[idx] = remaining;
-      const lvl = own.levelInsert(price);
-      lvl.total += remaining;
-      this.pool.levelPush(lvl, idx);
-      this.emit(sink, { kind: "replaced", orderId, price, qty: remaining });
+      map.remove(orderId);
+      sink.closed(++this.seq, orderId, CloseReason.Filled);
+      return;
     }
+    const nli = own.levelInsert(price);
+    const nloc = st.push(own.lev, nli, side, price, orderId, remaining, tif);
+    if (map.removes === removes) map.setValAt(mi, nloc); // no entry moved: skip the re-probe
+    else map.insert(orderId, nloc);
+    sink.replaced(++this.seq, orderId, price, remaining);
   }
 
   // ---- matching core ------------------------------------------------------
 
-  /// Aggressive walk of the opposite side. `bound === undefined` means market
+  /// Aggressive walk of the opposite side. `hasBound` false means market
   /// (match all available depth). Returns what is left of `qty`.
-  private cross(
-    side: Side,
-    bound: Price | undefined,
-    taker: OrderId,
-    qty: Qty,
-    sink: Sink,
-  ): Qty {
-    const pool = this.pool;
-    const map = this.map;
+  private cross(side: Side, hasBound: boolean, bound: Price, taker: OrderId, qty: Qty, sink: FlatSink): Qty {
     const opp = side === Side.Bid ? this.asks : this.bids;
+    const st = this.store;
+    const F = st.F;
+    const B = st.B;
+    const lev: LevelArena = opp.lev;
+    const map = this.map;
 
     for (;;) {
-      const bp = opp.bestPrice();
-      if (bp === undefined) break;
-      if (bound !== undefined) {
-        const crosses = side === Side.Bid ? bp <= bound : bp >= bound;
-        if (!crosses) break;
-      }
-      const lvl = opp.levelMut(bp);
-      if (lvl === undefined) break;
-      let emptied = false;
-      for (;;) {
-        const mi = lvl.head;
-        if (mi === NIL) break;
-        const mid = pool.id[mi];
-        const mqty = pool.qty[mi];
-        const q = Math.min(qty, mqty);
-        this.emit(sink, { kind: "trade", maker: mid, taker, price: bp, qty: q });
-        lvl.total -= q;
-        pool.qty[mi] = mqty - q;
+      const bp = opp.bestPx();
+      if (bp !== bp) break; // NaN: side empty
+      if (hasBound && (side === Side.Bid ? bp > bound : bp < bound)) break;
+      const li = opp.levelMut(bp);
+      if (li < 0) break;
+      const LF = lev.F;
+      const LI = lev.I;
+      const hx = (li << 2) + 2;
+      while (LI[hx] !== NIL) {
+        // front(): advance the head chunk's cursor past dead slots.
+        const c = LI[hx];
+        const cb = c << 7;
+        let h = B[cb + 16];
+        const q0 = (c << 4) + 5;
+        while (F[q0 + 2 * h] === 0) h++;
+        B[cb + 16] = h;
+        const loc = (c << 3) | h;
+        const mid = F[2 * loc + 4];
+        const mqty = F[2 * loc + 5];
+        const q = qty < mqty ? qty : mqty;
+        sink.trade(++this.seq, mid, taker, bp, q);
+        LF[li << 1] -= q;
+        F[2 * loc + 5] = mqty - q;
         qty -= q;
         if (mqty === q) {
-          pool.levelUnlink(lvl, mi);
+          // Slot is now dead (qty 0): retire it in place.
+          st.live--;
+          const l = B[cb + 18] - 1;
+          B[cb + 18] = l;
+          if (l === 0) st.dropChunk(lev, li, c);
           map.remove(mid);
-          pool.free(mi);
-          this.emit(sink, { kind: "closed", orderId: mid, reason: CloseReason.Filled });
+          sink.closed(++this.seq, mid, CloseReason.Filled);
         }
         if (qty === 0) break;
       }
-      emptied = lvl.head === NIL;
-      if (emptied) opp.unlinkLevel(bp);
+      if (LI[hx] === NIL) opp.unlinkLevel(bp);
       if (qty === 0) break;
     }
     return qty;
   }
 
-  /// Insert a resting order (pool slot guaranteed available by the book-full
-  /// check at ingest).
+  /// Insert a resting order (capacity guaranteed by the book-full check).
   private rest(orderId: OrderId, side: Side, price: Price, qty: Qty, tif: Tif): void {
-    const idx = this.pool.alloc();
-    this.pool.set(idx, orderId, side, OType.Limit, tif, price, qty);
     const own = side === Side.Bid ? this.bids : this.asks;
-    const lvl = own.levelInsert(price);
-    lvl.total += qty;
-    this.pool.levelPush(lvl, idx);
-    this.map.insert(orderId, idx);
+    const li = own.levelInsert(price);
+    this.map.insert(orderId, this.store.push(own.lev, li, side, price, orderId, qty, tif));
   }
 
   // ---- queries ------------------------------------------------------------
 
   order(id: OrderId): OrderInfo | undefined {
-    const i = this.map.get(id);
-    if (i < 0) return undefined;
-    return {
-      id: this.pool.id[i],
-      side: this.pool.side[i],
-      price: this.pool.price[i],
-      qty: this.pool.qty[i],
-    };
+    const loc = this.map.get(id);
+    if (loc < 0) return undefined;
+    const st = this.store;
+    return { id: st.id(loc), side: st.side(loc), price: st.price(loc), qty: st.qty(loc) };
   }
 
   bestBid(): Price | undefined { return this.bids.bestPrice(); }
   bestAsk(): Price | undefined { return this.asks.bestPrice(); }
-  orderCount(): number { return this.pool.live; }
+  orderCount(): number { return this.store.live; }
   seqNo(): number { return this.seq; }
   levelCount(side: Side): number {
     return (side === Side.Bid ? this.bids : this.asks).len();
@@ -289,20 +403,13 @@ export class OrderBook {
   /// FIFO within each level.
   restingOrders(): RestingOrder[] {
     const out: RestingOrder[] = [];
+    const st = this.store;
     for (const side of [Side.Bid, Side.Ask]) {
       const idx = side === Side.Bid ? this.bids : this.asks;
-      for (const d of idx.depth(Number.MAX_SAFE_INTEGER)) {
-        const lvl = idx.levelMut(d.price);
-        if (lvl === undefined) continue;
-        for (let i = lvl.head; i !== NIL; i = this.pool.next[i]) {
-          out.push({
-            orderId: this.pool.id[i],
-            side: this.pool.side[i],
-            price: this.pool.price[i],
-            qty: this.pool.qty[i],
-            tif: this.pool.tif[i],
-          });
-        }
+      for (const li of idx.levels(Number.MAX_SAFE_INTEGER)) {
+        st.forEach(idx.lev, li, (loc) => {
+          out.push({ orderId: st.id(loc), side, price: st.price(loc), qty: st.qty(loc), tif: st.tif(loc) });
+        });
       }
     }
     return out;
@@ -314,13 +421,8 @@ export class OrderBook {
     const b = new OrderBook(cfg);
     b.seq = seq;
     for (const o of orders) {
-      const idx = b.pool.alloc();
-      if (idx === NIL) break;
-      b.pool.set(idx, o.orderId, o.side, OType.Limit, o.tif, o.price, o.qty);
-      const lvl = (o.side === Side.Bid ? b.bids : b.asks).levelInsert(o.price);
-      lvl.total += o.qty;
-      b.pool.levelPush(lvl, idx);
-      b.map.insert(o.orderId, idx);
+      if (b.store.live >= cfg.maxOrders) break;
+      b.rest(o.orderId, o.side, o.price, o.qty, o.tif);
     }
     return b;
   }
@@ -332,37 +434,26 @@ export class OrderBook {
   // ---- internals ------------------------------------------------------------
 
   private priceOk(price: Price): boolean {
-    return this.cfg.index === IndexKind.Ladder
-      ? price >= this.cfg.priceMin && price <= this.cfg.priceMax
-      : price > 0;
+    return this.ladder ? price >= this.pmin && price <= this.pmax : price > 0;
   }
 
   private wouldCross(side: Side, price: Price): boolean {
     if (side === Side.Bid) {
-      const bp = this.asks.bestPrice();
-      return bp !== undefined && price >= bp;
+      const bp = this.asks.bestPx();
+      return bp === bp && price >= bp;
     }
-    const bp = this.bids.bestPrice();
-    return bp !== undefined && price <= bp;
+    const bp = this.bids.bestPx();
+    return bp === bp && price <= bp;
   }
 
   /// Quantity available on the opposite side within `price` (FOK pre-check).
   private fillable(side: Side, price: Price): Qty {
-    const [lo, hi] =
-      this.cfg.index === IndexKind.Ladder
-        ? [this.cfg.priceMin, this.cfg.priceMax]
-        : [Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER];
-    return side === Side.Bid
-      ? this.asks.sumRange(lo, price)
-      : this.bids.sumRange(price, hi);
+    const lo = this.ladder ? this.pmin : Number.MIN_SAFE_INTEGER;
+    const hi = this.ladder ? this.pmax : Number.MAX_SAFE_INTEGER;
+    return side === Side.Bid ? this.asks.sumRange(lo, price) : this.bids.sumRange(price, hi);
   }
 
-  private emit(sink: Sink, ev: Event): void {
-    this.seq++;
-    sink.onEvent(this.seq, ev);
-  }
-
-  private reject(sink: Sink, orderId: OrderId, reason: RejectReason): void {
-    this.emit(sink, { kind: "rejected", orderId, reason });
+  private reject(sink: FlatSink, orderId: OrderId, reason: RejectReason): void {
+    sink.rejected(++this.seq, orderId, reason);
   }
 }
